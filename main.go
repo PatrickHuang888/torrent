@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	log "github.com/sirupsen/logrus"
-	"net"
 	"net/url"
 	"os/signal"
 	"sync"
@@ -204,31 +203,61 @@ type tracker struct {
 }
 
 func (t tracker) connect(timeout time.Duration) error {
-	var chan 
-	if t.url.Scheme == "udp" {
+	log.Infof("connect")
+
+	/*if t.url.Scheme == "udp" {
 		conn, err := net.Dial("udp", t.url.Host)
 		if err != nil {
 			return errors.WithStack(err)
 		}
 		defer conn.Close()
-	}
+	}*/
+
+	time.Sleep(20 * time.Second)
+	log.Infof("connec finished")
+
 	return nil
 }
 
 func (t *tracker) run(ctx context.Context) error {
-	n := 0
+	log.Info("tracker run")
 
-	timeout := time.Duration(60*(2<<n)) * time.Second
+	//n := 0
 
-	for {
-		if err := t.connect(timeout); err != nil {
-			return err
+	//timeout := time.Duration(60*(2<<n)) * time.Second
+	timeout := 10 * time.Second
+
+	finished := make(chan bool)
+	loop:=true
+
+	for loop{
+
+		go func() {
+			if err := t.connect(timeout); err != nil {
+
+			}
+			finished <- true
+		}()
+
+
+		select {
+		case <-time.After(timeout):
+			log.Infof("time out")
+			break
+
+		case <-ctx.Done():
+			log.Infof("tracker %s done", t.rawurl)
+			loop=false
+
+		case <-finished:
+
+				log.Infof("finished")
+				loop = false
+
 		}
+
 	}
 
-	select {
-	case <-ctx.Done():
-		log.Infof("tracker %s done", t.rawurl)
-	}
+	log.Infof("tracker exit run")
 	return nil
 }
