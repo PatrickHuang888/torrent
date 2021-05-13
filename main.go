@@ -2,20 +2,18 @@ package main
 
 import (
 	"context"
-	"crypto/sha1"
 	"encoding/binary"
-	"errors"
-	"fmt"
-	"math/rand"
+	log "github.com/sirupsen/logrus"
 	"net"
 	"net/url"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
-	//bencode "github.com/jackpal/bencode-go"
-	bencode "github.com/IncSW/go-bencode"
 	"os"
+
+	"github.com/pkg/errors"
 )
 
 type torrent struct {
@@ -69,46 +67,21 @@ func (pkt packet) toConnectResponse() (connectRsp, error) {
 	return rsp, nil
 }
 
-type tracker struct {
-	rawurl string
-	url    *url.URL
-}
-
-func (t tracker) connect(ctx context.Context) {
-	if t.url.Scheme == "udp" {
-		conn, err := net.DialTimeout("udp", t.url.Host, timeout)
-		if err != nil {
-			fmt.Printf("+v", err)
-			os.Exit(1)
-		}
-		defer conn.Close()
-	}
-}
-
-func (t *tracker) run (ctx context.Context) error {
-		
-	select {
-	case <- ctx.Done():
-		fmt.Printf("tracker %s done", t.rawurl)
-	}
-	return nil
-}
-
 func main() {
-	f, err := os.ReadFile("/u01/downloads/City.on.a.Hill.S02E04.Overtime.White.And.Overtime.Stupid.1080p.AMZN.WEBRip.DDP5.1.x264-NTb[rartv]-[rarbg.to].torrent")
+	//f, err := os.ReadFile("/u01/downloads/City.on.a.Hill.S02E04.Overtime.White.And.Overtime.Stupid.1080p.AMZN.WEBRip.DDP5.1.x264-NTb[rartv]-[rarbg.to].torrent")
 	//f, err := os.Open("/u01/downloads/City.on.a.Hill.S02E04.Overtime.White.And.Overtime.Stupid.1080p.AMZN.WEBRip.DDP5.1.x264-NTb[rartv]-[rarbg.to].torrent")
-	if err != nil {
+	/*if err != nil {
 		fmt.Printf("%+v", err)
 		os.Exit(1)
-	}
+	}*/
 	//defer f.Close()
 
 	//t:= &torrent{}
 
-	d, err := bencode.Unmarshal(f)
+	/*d, err := bencode.Unmarshal(f)
 	if err != nil {
 		fmt.Printf("%+v")
-	}
+	}*/
 
 	//torrent:= t.(*torrent)
 	//fmt.Println(torrent.Announce)
@@ -126,7 +99,7 @@ func main() {
 		}
 	}*/
 
-	t := d.(map[string]interface{})
+	/*t := d.(map[string]interface{})
 
 	ann := string(t["announce"].([]byte))
 	fmt.Println(ann)
@@ -156,16 +129,9 @@ func main() {
 		os.Exit(1)
 	}
 	infHash := sha1.Sum(infoData)
-	fmt.Println(infHash)
+	fmt.Println(infHash)*/
 
-
-	var terminate = make(chan os.Signal, 1)
-	signal.Notify(terminate, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(terminate)
-
-
-
-	n := 0
+	/*n := 0
 	timeout := time.Duration(60*(2 << n))*time.Second
 	for _, t := range trackers {
 		if t.url.Scheme == "udp" {
@@ -203,27 +169,66 @@ func main() {
 			}
 		}
 
-	}
+	}*/
 
+	var terminate = make(chan os.Signal, 1)
+	signal.Notify(terminate, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(terminate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var t tracker
+
+	var wg sync.WaitGroup
 
 	go func() {
-		run()
+		wg.Add(1)
+		if err := t.run(ctx); err != nil {
+			log.Error(err)
+		}
+		wg.Done()
 	}()
 
 	select {
 	case <-terminate:
 		// shutdown
+		log.Infof("terminating ...")
+		cancel()
+		wg.Wait()
 	}
 }
 
+type tracker struct {
+	rawurl string
+	url    *url.URL
+}
 
-func run() {
-	baseCtx := context.Background()
+func (t tracker) connect(timeout time.Duration) error {
+	var chan 
+	if t.url.Scheme == "udp" {
+		conn, err := net.Dial("udp", t.url.Host)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		defer conn.Close()
+	}
+	return nil
+}
 
-	//timeout
+func (t *tracker) run(ctx context.Context) error {
+	n := 0
+
+	timeout := time.Duration(60*(2<<n)) * time.Second
+
 	for {
-
+		if err := t.connect(timeout); err != nil {
+			return err
+		}
 	}
+
+	select {
+	case <-ctx.Done():
+		log.Infof("tracker %s done", t.rawurl)
+	}
+	return nil
 }
-
-
