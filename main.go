@@ -177,14 +177,15 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var t tracker
+	t.stage = StageConnect
+	t.ctx = ctx
+	t.terminate = cancel
 
 	var wg sync.WaitGroup
 
 	go func() {
 		wg.Add(1)
-		if err := t.run(ctx); err != nil {
-			log.Error(err)
-		}
+		t.run()
 		wg.Done()
 	}()
 
@@ -192,18 +193,25 @@ func main() {
 	case <-terminate:
 		// shutdown
 		log.Infof("terminating ...")
-		cancel()
+		t.terminate()
 		wg.Wait()
 	}
 }
 
 type tracker struct {
+	stage int
+
+	ctx       context.Context
+	terminate context.CancelFunc
+
 	rawurl string
 	url    *url.URL
 }
 
-func (t tracker) connect(timeout time.Duration) error {
-	log.Infof("connect")
+func (t *tracker) connect(ctx context.Context, attempt int) error {
+	c := make(chan error, 1)
+
+	log.Infof("connect %d", attempt)
 
 	/*if t.url.Scheme == "udp" {
 		conn, err := net.Dial("udp", t.url.Host)
@@ -213,51 +221,90 @@ func (t tracker) connect(timeout time.Duration) error {
 		defer conn.Close()
 	}*/
 
-	time.Sleep(20 * time.Second)
-	log.Infof("connec finished")
+	go func() {
+		time.Sleep(15 * time.Second)
+		c <- nil
 
-	return nil
+		t.stage = StageFinished
+	}()
+
+	var err error
+
+	select {
+	case err = <-c:
+		log.Infof("connect %d exit", attempt)
+
+	case <-ctx.Done():
+		log.Infof("connect %d canceled", attempt)
+	}
+
+	return err
 }
 
-func (t *tracker) run(ctx context.Context) error {
+const StageConnect = 2
+const StageFinished = 10
+const MaxAttempt = 5
+
+func (t *tracker) run() {
 	log.Info("tracker run")
 
-	//n := 0
-
+	n := 0
 	//timeout := time.Duration(60*(2<<n)) * time.Second
-	timeout := 10 * time.Second
 
-	finished := make(chan bool)
-	loop:=true
+	attempt := 0
 
-	for loop{
+	c := make(chan struct{})
+
+	loop := true
+	for loop {
+
+		timeout := time.Duration(5*(2<<n)) * time.Second
+
+		var wg sync.WaitGroup
+
+		ctx, cancel := context.WithCancel(t.ctx)
 
 		go func() {
-			if err := t.connect(timeout); err != nil {
+			wg.Add(1)
+			defer wg.Done()
 
+			if t.stage == StageConnect {
+				if err := t.connect(ctx, attempt); err != nil {
+					log.Error(err)
+					t.terminate()
+				}
 			}
-			finished <- true
-		}()
 
+			if t.stage == StageFinished {
+				log.Infof("stage finished")
+				loop = false
+				close(c)
+			}
+
+		}()
 
 		select {
 		case <-time.After(timeout):
-			log.Infof("time out")
-			break
+			log.Infof("time out %s", timeout.String())
+			cancel()
+			wg.Wait()
 
-		case <-ctx.Done():
-			log.Infof("tracker %s done", t.rawurl)
-			loop=false
-
-		case <-finished:
-
-				log.Infof("finished")
+			n++
+			attempt++
+			if attempt >= MaxAttempt {
 				loop = false
+			}
 
+		case <-c:
+			log.Infof("tracker finished")
+
+		case <-t.ctx.Done():
+			loop = false
+			log.Infof("tracker cancel")
 		}
 
 	}
 
 	log.Infof("tracker exit run")
-	return nil
+
 }
