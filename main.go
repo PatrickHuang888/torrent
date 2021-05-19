@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -196,9 +197,9 @@ func main() {
 
 	}*/
 
-	var terminate = make(chan os.Signal, 1)
-	signal.Notify(terminate, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(terminate)
+	var sigs = make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+	defer signal.Stop(sigs)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -234,13 +235,23 @@ func main() {
 		wg.Done()
 	}()
 
-	select {
-	case <-terminate:
-		// shutdown
-		log.Infof("terminating ...")
-		trk.terminate()
-		wg.Wait()
-	}
+	loop:
+		for {
+			sig := <- sigs
+
+			switch sig {
+			case syscall.SIGQUIT:
+				buf := make([]byte, 1<<10)
+				stacklen := runtime.Stack(buf, true)
+				log.Debugf("=== received SIGQUIT ===\n*** goroutine dump...\n%s\n*** end\n", buf[:stacklen])
+			default:
+				// shutdown
+				log.Infof("terminating ...")
+				trk.terminate()
+				wg.Wait()
+				break loop
+			}
+		}
 }
 
 type tracker struct {
@@ -321,15 +332,23 @@ func (t *tracker) connect(ctx context.Context, attempt int, trt *torrent) error 
 		}
 
 		peersListI := unMap["peers"].([]interface{})
-		for _, v := range peersListI {
+		log.Infof("got %d peers", len(peersListI))
+		for i, v := range peersListI {
 			peerMap := v.(map[string]interface{})
 			peerIP := string(peerMap["ip"].([]byte))
 			fmt.Println(peerIP)
+			_ =  int(peerMap["port"].(int64))
+
+			if i==len(peersListI)-1 {
+				log.Tracef("peers finished")
+			}
 		}
 
 
 
 		t.stage= StageFinished
+
+		c <- nil
 
 		/*if t.url.Scheme == "udp" {
 			conn, err := net.Dial("udp", t.url.Host)
