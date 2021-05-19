@@ -1,11 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha1"
 	"encoding/binary"
+	"fmt"
 	log "github.com/sirupsen/logrus"
+	"net"
+	"net/http"
 	"net/url"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -13,9 +21,24 @@ import (
 	"os"
 
 	"github.com/pkg/errors"
+
+	"github.com/IncSW/go-bencode"
 )
 
+func init() {
+	log.SetLevel(log.TraceLevel)
+}
+
 type torrent struct {
+	Filename string
+
+	InfoHash   [20]byte
+	PeerId     [20]byte
+	Port       string
+	Uploaded   string
+	Downloaded string
+	Left       string
+
 	Announce     string        `bencode:"announce"`
 	AnnounceList []interface{} `bencode:"announce-list"`
 	//info interface{} `bencode:"info"`
@@ -66,21 +89,26 @@ func (pkt packet) toConnectResponse() (connectRsp, error) {
 	return rsp, nil
 }
 
+const Port = 6881
+
 func main() {
-	//f, err := os.ReadFile("/u01/downloads/City.on.a.Hill.S02E04.Overtime.White.And.Overtime.Stupid.1080p.AMZN.WEBRip.DDP5.1.x264-NTb[rartv]-[rarbg.to].torrent")
+	trt := &torrent{Filename: "/home/hxm/Downloads/ubuntu-21.04-desktop-amd64.iso.torrent"}
+
+	data, err := os.ReadFile(trt.Filename)
+	//data, err := os.ReadFile("/u01/downloads/City.on.a.Hill.S02E04.Overtime.White.And.Overtime.Stupid.1080p.AMZN.WEBRip.DDP5.1.x264-NTb[rartv]-[rarbg.to].torrent")
 	//f, err := os.Open("/u01/downloads/City.on.a.Hill.S02E04.Overtime.White.And.Overtime.Stupid.1080p.AMZN.WEBRip.DDP5.1.x264-NTb[rartv]-[rarbg.to].torrent")
-	/*if err != nil {
+	if err != nil {
 		fmt.Printf("%+v", err)
 		os.Exit(1)
-	}*/
+	}
 	//defer f.Close()
 
 	//t:= &torrent{}
 
-	/*d, err := bencode.Unmarshal(f)
+	d, err := bencode.Unmarshal(data)
 	if err != nil {
 		fmt.Printf("%+v")
-	}*/
+	}
 
 	//torrent:= t.(*torrent)
 	//fmt.Println(torrent.Announce)
@@ -98,37 +126,35 @@ func main() {
 		}
 	}*/
 
-	/*t := d.(map[string]interface{})
+	trtMap := d.(map[string]interface{})
 
-	ann := string(t["announce"].([]byte))
-	fmt.Println(ann)
+	ann := string(trtMap["announce"].([]byte))
+	log.Debugf("announce %s\n", ann)
 
-	trkList := t["announce-list"].([]interface{})
+	trt.Announce = ann
 
-	var trackers []tracker
+	//trkList := trt["announce-list"].([]interface{})
 
-	for _, v := range trkList {
-		tl := v.([]interface{})
-		for _, v1 := range tl {
-			t := tracker{rawurl: string(v1.([]byte))}
-			url, err := url.Parse(t.rawurl)
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-			t.url = url
-			trackers = append(trackers, t)
-		}
-	}
-
-	info := t["info"]
+	info := trtMap["info"]
 	infoData, err := bencode.Marshal(info)
 	if err != nil {
 		fmt.Printf("%+v", err)
 		os.Exit(1)
 	}
-	infHash := sha1.Sum(infoData)
-	fmt.Println(infHash)*/
+	trt.InfoHash = sha1.Sum(infoData)
+
+	_, err = rand.Read(trt.PeerId[:])
+	if err != nil {
+		log.Error(err)
+		os.Exit(1)
+	}
+
+	trt.Port = strconv.Itoa(Port)
+	trt.Uploaded = "0"
+	trt.Downloaded = "0"
+
+	length := info.(map[string]interface{})["length"]
+	trt.Left = strconv.Itoa(int(length.(int64)))
 
 	/*n := 0
 	timeout := time.Duration(60*(2 << n))*time.Second
@@ -176,16 +202,35 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var t tracker
-	t.stage = StageConnect
-	t.ctx = ctx
-	t.terminate = cancel
+	trk := &tracker{rawurl: ann, stage: StageConnect}
+	trk.ctx = ctx
+	trk.terminate = cancel
+
+	/*var trackers []tracker
+	for _, v := range trkList {
+		tl := v.([]interface{})
+		for _, v1 := range tl {
+			t := tracker{rawurl: string(v1.([]byte))}
+			url, err := url.Parse(t.rawurl)
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+			t.url = url
+
+			t.stage = StageConnect
+			t.ctx = ctx
+			t.terminate = cancel
+
+			trackers = append(trackers, t)
+		}
+	}*/
 
 	var wg sync.WaitGroup
 
 	go func() {
 		wg.Add(1)
-		t.run()
+		trk.run(trt)
 		wg.Done()
 	}()
 
@@ -193,7 +238,7 @@ func main() {
 	case <-terminate:
 		// shutdown
 		log.Infof("terminating ...")
-		t.terminate()
+		trk.terminate()
 		wg.Wait()
 	}
 }
@@ -206,47 +251,118 @@ type tracker struct {
 
 	rawurl string
 	url    *url.URL
+
+	conn net.Conn
 }
 
-func (t *tracker) connect(ctx context.Context, attempt int) error {
+func (t *tracker) getRequest(trt *torrent) string {
+	var buf strings.Builder
+
+	buf.WriteString("?info_hash=")
+	buf.WriteString(url.QueryEscape(string(trt.InfoHash[:])))
+
+	buf.WriteString("&peer_id=")
+	buf.WriteString(url.QueryEscape(string(trt.PeerId[:])))
+
+	buf.WriteString("&port=")
+	buf.WriteString(url.QueryEscape(trt.Port))
+
+	buf.WriteString("&uploaded=")
+	buf.WriteString(url.QueryEscape(trt.Uploaded))
+
+	buf.WriteString("&downloaded=")
+	buf.WriteString(url.QueryEscape(trt.Downloaded))
+
+	buf.WriteString("&left=")
+	buf.WriteString(url.QueryEscape(trt.Left))
+	return buf.String()
+}
+
+func (t *tracker) connect(ctx context.Context, attempt int, trt *torrent) error {
 	c := make(chan error, 1)
 
-	log.Infof("connect %d", attempt)
-
-	/*if t.url.Scheme == "udp" {
-		conn, err := net.Dial("udp", t.url.Host)
-		if err != nil {
-			return errors.WithStack(err)
-		}
-		defer conn.Close()
-	}*/
+	log.Debugf("connect %d", attempt)
 
 	go func() {
-		time.Sleep(15 * time.Second)
-		c <- nil
 
-		t.stage = StageFinished
+		url := t.rawurl + t.getRequest(trt)
+		resp, err := http.Get(url)
+
+		if err != nil {
+			log.Error(errors.WithStack(err))
+			c <- err
+			return
+		}
+
+		if resp.StatusCode!=200 {
+			err = errors.New(resp.Status)
+			c <- err
+			return
+		}
+
+		buf := &bytes.Buffer{}
+		if _, err := buf.ReadFrom(resp.Body);err!=nil {
+			c <- errors.WithStack(err)
+			return
+		}
+		defer resp.Body.Close()
+
+		um, err:= bencode.Unmarshal(buf.Bytes())
+		if err!=nil {
+			c <- errors.WithStack(err)
+			return
+		}
+
+		unMap := um.(map[string]interface{})
+		v, ok := unMap["failure reason"]
+		if ok {
+			c <- errors.New(v.(string))
+			return
+		}
+
+		peersListI := unMap["peers"].([]interface{})
+		for _, v := range peersListI {
+			peerMap := v.(map[string]interface{})
+			peerIP := string(peerMap["ip"].([]byte))
+			fmt.Println(peerIP)
+		}
+
+
+
+		t.stage= StageFinished
+
+		/*if t.url.Scheme == "udp" {
+			conn, err := net.Dial("udp", t.url.Host)
+			if err != nil {
+				c <- errors.WithStack(err)
+			}
+			t.conn = conn
+		}*/
+
 	}()
 
 	var err error
-
 	select {
 	case err = <-c:
-		log.Infof("connect %d exit", attempt)
+		log.Tracef("connect %d exit", attempt)
 
 	case <-ctx.Done():
-		log.Infof("connect %d canceled", attempt)
+		log.Tracef("connect %d canceled", attempt)
 	}
 
 	return err
+}
+
+func (t *tracker) close() {
+	t.conn.Close()
 }
 
 const StageConnect = 2
 const StageFinished = 10
 const MaxAttempt = 5
 
-func (t *tracker) run() {
-	log.Info("tracker run")
+func (t *tracker) run(trt *torrent) {
+	log.Infof("tracker %s run", t.rawurl)
 
 	n := 0
 	//timeout := time.Duration(60*(2<<n)) * time.Second
@@ -258,7 +374,7 @@ func (t *tracker) run() {
 	loop := true
 	for loop {
 
-		timeout := time.Duration(5*(2<<n)) * time.Second
+		timeout := time.Duration(60*(2<<n)) * time.Second
 
 		var wg sync.WaitGroup
 
@@ -269,14 +385,14 @@ func (t *tracker) run() {
 			defer wg.Done()
 
 			if t.stage == StageConnect {
-				if err := t.connect(ctx, attempt); err != nil {
+				if err := t.connect(ctx, attempt, trt); err != nil {
 					log.Error(err)
 					t.terminate()
 				}
 			}
 
 			if t.stage == StageFinished {
-				log.Infof("stage finished")
+				log.Tracef("stage finished")
 				loop = false
 				close(c)
 			}
